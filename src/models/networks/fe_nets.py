@@ -71,6 +71,31 @@ class FEB(nn.Module):
         return output, low, high
 
 
+class FEBBlock(nn.Module):
+    def __init__(
+        self,
+        feat_dim=64,
+        n_feb_block=12,
+    ):
+        super().__init__()
+
+        self.febs = nn.ModuleList([FEB(feat_dim, feat_dim) for _ in range(n_feb_block)])
+
+    def forward(self, x):
+        low_f = []
+        high_f = []
+
+        out_blocks = []
+
+        for feb in self.febs:
+            x, l_f, h_f = feb(x)
+            low_f.append(l_f)
+            high_f.append(h_f)
+            out_blocks.append(x)
+
+        return out_blocks, torch.stack(low_f), torch.stack(high_f)
+
+
 class FENet(BaseGenerator):
     def __init__(
         self,
@@ -85,11 +110,9 @@ class FENet(BaseGenerator):
 
         self.scale = scale
 
-        self.init_conv = nn.Conv2d(in_channels, feat_dim, 7, padding=3)
+        self.init_conv = nn.Conv2d(in_channels, feat_dim, 3, 1, 1)
 
-        self.febs = nn.Sequential(
-            *[FEB(feat_dim, feat_dim) for _ in range(n_feb_block)]
-        )
+        self.feb_block = FEBBlock(feat_dim, n_feb_block)
         self.reduction = nn.Conv2d(feat_dim * n_feb_block, feat_dim, 1)
 
         self.ups = nn.ModuleList([])
@@ -103,23 +126,12 @@ class FENet(BaseGenerator):
 
         self.exit = nn.Conv2d(feat_dim, out_channels, 3, 1, 1)
 
-        self.high_f, self.low_f = [], []
-
     def forward(self, x):
-        self.low_f.clear()
-        self.high_f.clear()
-
         out = self.init_conv(x)
 
         c0 = out
 
-        out_blocks = []
-
-        for feb in self.febs:
-            out, low_f, high_f = feb(out)
-            self.low_f.append(low_f)
-            self.high_f.append(high_f)
-            out_blocks.append(out)
+        out_blocks, low_f, high_f = self.feb_block(out)
 
         output = self.reduction(torch.cat(out_blocks, 1))
 
@@ -141,4 +153,4 @@ class FENet(BaseGenerator):
 
         output = F.tanh(output)
 
-        return output
+        return output, low_f, high_f

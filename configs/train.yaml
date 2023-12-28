@@ -37,7 +37,7 @@ model:
   discriminator:
     class_path: SpatialDiscriminator
     init_args:
-      spatial_size: 256  # scale x data.patch_size
+      spatial_size: 128  # scale x data.patch_size
   gen_lr: 5e-5
   dis_lr: 5e-5
   losses:
@@ -54,6 +54,10 @@ model:
       type: LPIPS
       weight: 0.2
       net: vgg
+    freq_crit:
+      type: CB
+      weight: [1.0, 0.5]
+      reduction: mean
     gan_crit:
       type: GAN
       weight: 0.1
@@ -65,7 +69,7 @@ data:
   extension: png
   hr_path_filter: '1088'
   lr_path_filter: '544'
-  patch_size: 64
+  patch_size: 32
   train_pct: 0.8
   dataset_upscale_factor: *UPSCALE_FACTOR
-  batch_size: 16
+  batch_size: 8

@@ -1,12 +1,12 @@
-from typing import Dict, Literal
+from typing import Any, Dict, Literal
 
 import lightning as L
 import torch
+import torch.nn.functional as F
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
 
 from models.networks.base_nets import BaseDiscriminator, BaseGenerator
 from optim import define_criterion
-from utils import net_utils
 
 
 class SRGAN(L.LightningModule):
@@ -15,12 +15,9 @@ class SRGAN(L.LightningModule):
         generator: BaseGenerator,
         discriminator: BaseDiscriminator,
         *,
-        crop_border_ratio: float = 0.75,
         losses: Dict,
         gen_lr: float = 5e-5,
         dis_lr: float = 5e-5,
-        dis_update_policy: Literal["always", "adaptive"] = "always",
-        dis_update_threshold: float = 0.4,
     ):
         super(SRGAN, self).__init__()
         self.save_hyperparameters(ignore=["generator", "discriminator"])
@@ -38,6 +35,31 @@ class SRGAN(L.LightningModule):
             )
         else:
             self.feat_net = None
+
+        # frequency criterion
+        self.freq_crit, (self.freq_high_w, self.freq_low_w) = define_criterion(
+            losses.get("freq_crit")
+        )
+        if self.freq_crit is not None:
+
+            class FreqNet(L.LightningModule):
+                def __init__(self, G):
+                    super().__init__()
+                    self.init_conv = G.init_conv
+                    self.feb_block = G.feb_block
+
+                def forward(self, x):
+                    self.freeze()
+
+                    out = self.init_conv(x)
+
+                    out_blocks, low_f, high_f = self.feb_block(out)
+
+                    self.unfreeze()
+
+                    return low_f, high_f
+
+            self.freq_net = FreqNet(self.G)
 
         # gan criterion
         self.gan_crit, self.gan_w = define_criterion(losses.get("gan_crit"))
@@ -61,7 +83,7 @@ class SRGAN(L.LightningModule):
         optim_D.zero_grad()
 
         # ------------ forward G ------------ #
-        hr_fake = self.G(lr_data)
+        hr_fake, low_f_fake, high_f_fake = self.G(lr_data)
 
         # ------------ forward D ------------ #
         self.D.unfreeze()
@@ -99,6 +121,39 @@ class SRGAN(L.LightningModule):
             loss_G += self.pix_w * loss_pix_G
             to_log["G_pixel_loss"] = loss_pix_G
 
+        # frequency loss
+        if self.freq_crit is not None:
+            high_f_true, low_f_true = self.freq_net(hr_true)
+            _, _, c, h_l, w_l = high_f_fake.shape
+            _, _, c, h_h, w_h = high_f_true.shape
+
+            high_f_true = high_f_true.view(-1, c, h_h, w_h)
+            low_f_true = low_f_true.view(-1, c, h_h, w_h)
+
+            # # small true vs small fake
+            # high_f_fake = high_f_fake.view(-1, c, h_l, w_l)
+            # low_f_fake = low_f_fake.view(-1, c, h_l, w_l)
+            # high_f_true_small = F.interpolate(
+            #     high_f_true, size=(h_l, w_l), mode="nearest"
+            # )
+            # low_f_true_small = F.interpolate(
+            #     low_f_true, size=(h_l, w_l), mode="nearest"
+            # )
+            # loss_high_f1 = self.freq_crit(high_f_true_small, high_f_fake)
+            # loss_low_f1 = self.freq_crit(low_f_true_small, low_f_fake)
+
+            # big true vs big fake
+            high_f_fake, low_f_fake = self.freq_net(hr_fake)
+            high_f_fake = high_f_fake.view(-1, c, h_h, w_h)
+            low_f_fake = low_f_fake.view(-1, c, h_h, w_h)
+            loss_high_f2 = self.freq_crit(high_f_true, high_f_fake)
+            loss_low_f2 = self.freq_crit(low_f_true, low_f_fake)
+
+            # loss_G += self.freq_high_w * loss_high_f1 + self.freq_low_w * loss_low_f1
+            loss_G += self.freq_high_w * loss_high_f2 + self.freq_low_w * loss_low_f2
+            to_log["G_high_freq_loss"] = loss_high_f2
+            to_log["G_low_freq_loss"] = loss_low_f2
+
         # feature (feat) loss
         if self.feat_crit is not None:
             if self.feat_net is None:
@@ -131,7 +186,7 @@ class SRGAN(L.LightningModule):
     def validation_step(self, batch, batch_idx) -> STEP_OUTPUT:
         hr_true, lr_data = batch
 
-        hr_fake = self.G(lr_data)
+        hr_fake, _, _ = self.G(lr_data)
 
         # ssim_val = self.ssim(y_fake, y_true).mean()
         # lpips_val = self.lpips_alex(y_fake, y_true).mean()
